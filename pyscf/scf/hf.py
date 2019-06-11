@@ -26,6 +26,7 @@ import time
 from functools import reduce
 import numpy
 import scipy.linalg
+import h5py
 from pyscf import gto
 from pyscf import lib
 from pyscf.lib import logger
@@ -1107,8 +1108,10 @@ def as_scanner(mf):
         def __init__(self, mf_obj):
             self.__dict__.update(mf_obj.__dict__)
             mf_obj = self
+            mf_objs = []
             # partial deepcopy to avoid overwriting existing objects
             while mf_obj is not None:
+                mf_objs.append(mf_obj)
                 if getattr(mf_obj, 'with_df', None):
                     mf_obj.with_df = copy.copy(mf_obj.with_df)
                 if getattr(mf_obj, 'with_x2c', None):
@@ -1117,6 +1120,9 @@ def as_scanner(mf):
                     mf_obj.grids = copy.copy(mf_obj.grids)
                     mf_obj._numint = copy.copy(mf_obj._numint)
                 if getattr(mf_obj, '_scf', None):
+                    # avoid endless loop caused by circular reference
+                    if mf_obj._scf in mf_objs:
+                        break
                     mf_obj._scf = copy.copy(mf_obj._scf)
                     mf_obj = mf_obj._scf
                 else:
@@ -1129,7 +1135,11 @@ def as_scanner(mf):
                 mol = self.mol.set_geom_(mol_or_geom, inplace=False)
 
             mf_obj = self
-            while mf_obj is not None:
+            mf_objs = []
+            while (mf_obj is not None and
+                   # avoid endless loop caused by circular reference
+                   mf_obj not in mf_objs):
+                mf_objs.append(mf_obj)
                 mf_obj.mol = mol
                 mf_obj.opt = None
                 mf_obj._eri = None
@@ -1156,11 +1166,10 @@ def as_scanner(mf):
                 dm0 = kwargs.pop('dm0')
             elif self.mo_coeff is None:
                 dm0 = None
-            elif self.chkfile:
+            elif self.chkfile and h5py.is_hdf5(self.chkfile):
                 dm0 = self.from_chk(self.chkfile)
             #elif mol.natm == 0: self._eri = mol._eri?
             else:
-                from pyscf.scf import addons
                 dm0 = self.make_rdm1()
                 # dm0 form last calculation cannot be used in the current
                 # calculation if a completely different system is given.
@@ -1171,6 +1180,7 @@ def as_scanner(mf):
                 # last calculation.
                 if dm0.shape[-1] != mol.nao:
                     #TODO:
+                    #from pyscf.scf import addons
                     #if numpy.any(last_mol.atom_charges() != mol.atom_charges()):
                     #    dm0 = None
                     #elif non-relativistic:
@@ -1337,11 +1347,8 @@ class SCF(lib.StreamObject):
 
         logger.info(self, '\n')
         logger.info(self, '******** %s ********', self.__class__)
-        method = []
-        cls = self.__class__
-        while cls != SCF:
-            method.append(cls.__name__)
-            cls = cls.__base__
+        method = [cls.__name__ for cls in self.__class__.__mro__
+                  if issubclass(cls, SCF) and cls != SCF]
         logger.info(self, 'method = %s', '-'.join(method))
         logger.info(self, 'initial guess = %s', self.init_guess)
         logger.info(self, 'damping factor = %g', self.damp)
@@ -1693,6 +1700,21 @@ class SCF(lib.StreamObject):
             raise TypeError('First argument of .apply method must be a '
                             'function/class or a name (string) of a method.')
 
+    def to_rhf(self, mf):
+        '''Convert the input mean-field object to a RHF/ROHF/RKS/ROKS object'''
+        from pyscf.scf import addons
+        return addons.convert_to_rhf(mf)
+
+    def to_uhf(self, mf):
+        '''Convert the input mean-field object to a UHF/UKS object'''
+        from pyscf.scf import addons
+        return addons.convert_to_uhf(mf)
+
+    def to_ghf(self, mf):
+        '''Convert the input mean-field object to a GHF/GKS object'''
+        from pyscf.scf import addons
+        return addons.convert_to_ghf(mf)
+
 
 ############
 
@@ -1735,7 +1757,7 @@ class RHF(SCF):
         return vhf
 
     def convert_from_(self, mf):
-        '''Convert given mean-field object to RHF/ROHF'''
+        '''Convert the input mean-field object to RHF/ROHF'''
         from pyscf.scf import addons
         return addons.convert_to_rhf(mf, out=self)
 
